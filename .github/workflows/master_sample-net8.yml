@@ -55,12 +55,14 @@ jobs:
         with:
           creds: ${{ secrets.AZURE_CREDENTIALS }}
 
-
       - name: Stop Azure Web App before deployment
         run: |
           az webapp stop \
             --name ${{ env.AZURE_WEBAPP_NAME }} \
-            --resource-group ${{ env.AZURE_RESOURCE_GROUP }} \
+            --resource-group ${{ env.AZURE_RESOURCE_GROUP }}
+
+      - name: Wait for 10 seconds
+        run: sleep 10
 
       - name: Deploy to Azure Web App
         id: deploy-to-webapp
@@ -74,4 +76,4 @@ jobs:
         run: |
           az webapp start \
             --name ${{ env.AZURE_WEBAPP_NAME }} \
-            --resource-group ${{ env.AZURE_RESOURCE_GROUP }} \
+            --resource-group ${{ env.AZURE_RESOURCE_GROUP }}
