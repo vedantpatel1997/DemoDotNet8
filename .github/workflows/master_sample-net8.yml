@@ -61,7 +61,6 @@ jobs:
           az webapp stop \
             --name ${{ env.AZURE_WEBAPP_NAME }} \
             --resource-group ${{ env.AZURE_RESOURCE_GROUP }} \
-            --slot ${{ env.AZURE_SLOT_NAME }}
 
       - name: Deploy to Azure Web App
         id: deploy-to-webapp
@@ -76,5 +75,3 @@ jobs:
           az webapp start \
             --name ${{ env.AZURE_WEBAPP_NAME }} \
             --resource-group ${{ env.AZURE_RESOURCE_GROUP }} \
-            --slot ${{ env.AZURE_SLOT_NAME }}
-
