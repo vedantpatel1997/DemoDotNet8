@@ -61,43 +61,31 @@ jobs:
             --name ${{ env.AZURE_WEBAPP_NAME }} \
             --resource-group ${{ env.AZURE_RESOURCE_GROUP }}
 
-      # 🔽 Replaces the old sleep with readiness probing
+      # 🔽 Replace sleep with SCM reachability check
       - name: Compute SCM hostname (handles slots)
         run: |
           APP="${{ env.AZURE_WEBAPP_NAME }}"
           SLOT="${{ env.AZURE_SLOT_NAME }}"
           if [ "$SLOT" = "Production" ] || [ -z "$SLOT" ]; then
             echo "SCM_HOSTNAME=${APP}.scm.azurewebsites.net" >> "$GITHUB_ENV"
-            echo "SLOT_ARG=" >> "$GITHUB_ENV"
           else
             echo "SCM_HOSTNAME=${APP}-${SLOT}.scm.azurewebsites.net" >> "$GITHUB_ENV"
-            echo "SLOT_ARG=--slot ${SLOT}" >> "$GITHUB_ENV"
           fi
 
-      - name: Wait for Kudu/SCM to be ready (max 5 min)
-        shell: bash
-        env:
-          APP: ${{ env.AZURE_WEBAPP_NAME }}
-          RG: ${{ env.AZURE_RESOURCE_GROUP }}
+      - name: Wait for Kudu/SCM to be reachable (max 5 min)
         run: |
-          USER=$(az webapp deployment list-publishing-profiles -g "$RG" -n "$APP" $SLOT_ARG -o tsv --query "[0].userName")
-          PASS=$(az webapp deployment list-publishing-profiles -g "$RG" -n "$APP" $SLOT_ARG -o tsv --query "[0].userPWD")
-          if [ -z "$USER" ] || [ -z "$PASS" ]; then
-            echo "Failed to fetch publishing credentials"; exit 1
-          fi
-          echo "Polling https://${SCM_HOSTNAME}/api/environment until ready..."
-          DEADLINE=$((SECONDS+300)); INTERVAL=5
+          DEADLINE=$((SECONDS+300))   # 5 minutes
+          INTERVAL=5
+          echo "Polling https://${SCM_HOSTNAME} until reachable..."
           while (( SECONDS < DEADLINE )); do
-            CODE=$(curl -sS -u "$USER:$PASS" -o /dev/null -w "%{http_code}" \
-                   --max-time 5 "https://${SCM_HOSTNAME}/api/environment" || true)
-            if [ "$CODE" = "200" ]; then
-              echo "Kudu is responding (200). Proceeding to deploy."
+            if curl -s -o /dev/null -w "%{http_code}" "https://${SCM_HOSTNAME}/" >/dev/null 2>&1; then
+              echo "Kudu endpoint is reachable. Proceeding."
               exit 0
             fi
-            echo "Kudu not ready yet (code=${CODE:-N/A}). Retrying in ${INTERVAL}s..."
-            sleep "$INTERVAL"
+            echo "Kudu not reachable yet. Retrying in ${INTERVAL}s..."
+            sleep $INTERVAL
           done
-          echo "Timed out waiting for Kudu/SCM to be ready after 5 minutes."
+          echo "Timed out waiting for Kudu/SCM to be reachable after 5 minutes."
           exit 1
 
       - name: Deploy to Azure Web App
