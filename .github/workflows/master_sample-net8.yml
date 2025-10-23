@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
 
 env:
-  AZURE_WEBAPP_NAME: 2510200040008352
+  AZURE_WEBAPP_NAME: "2510200040008352"
   AZURE_RESOURCE_GROUP: TempRG
   AZURE_SLOT_NAME: Production    # change if you use a non-Production slot
 
@@ -62,3 +62,4 @@ jobs:
           app-name: ${{ env.AZURE_WEBAPP_NAME }}
           slot-name: ${{ env.AZURE_SLOT_NAME }}
           package: .
+
