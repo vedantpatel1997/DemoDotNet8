@@ -69,27 +69,26 @@ jobs:
           slot-name: ${{ env.AZURE_SLOT_NAME }}
           package: ./publish_output
 
-      # Optional consistency validation
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
       - name: Run deployment consistency check
+        shell: bash
         run: |
+          set -e
           python -m pip install --upgrade pip
           pip install -r scripts/requirements.txt
 
           SUBSCRIPTION_ID=$(az account show --query id -o tsv)
 
-          cat <<EOF > scripts/.env
-          RESOURCE_GROUP=${{ env.AZURE_RESOURCE_GROUP }}
-          APP_NAME=${{ env.AZURE_WEBAPP_NAME }}
-          SLOT=${{ env.AZURE_SLOT_NAME }}
-          SUBSCRIPTION_ID=${SUBSCRIPTION_ID}
-          FILES_TO_CHECK=${{ env.FILES_TO_CHECK }}
-          USE_CLI_AUTH=true
-EOF
+          echo "RESOURCE_GROUP=${{ env.AZURE_RESOURCE_GROUP }}" > scripts/.env
+          echo "APP_NAME=${{ env.AZURE_WEBAPP_NAME }}" >> scripts/.env
+          echo "SLOT=${{ env.AZURE_SLOT_NAME }}" >> scripts/.env
+          echo "SUBSCRIPTION_ID=${SUBSCRIPTION_ID}" >> scripts/.env
+          echo "FILES_TO_CHECK=${{ env.FILES_TO_CHECK }}" >> scripts/.env
+          echo "USE_CLI_AUTH=true" >> scripts/.env
 
           python scripts/deployment-check.py || echo "DEPLOYMENT_CHECK_FAILED=true" >> $GITHUB_ENV
           rm -f scripts/.env
