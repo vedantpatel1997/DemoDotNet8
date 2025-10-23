@@ -56,6 +56,9 @@ jobs:
           name: published-app
           path: ./publish_output
 
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
       - name: Login to Azure
         uses: azure/login@v2
         with:
