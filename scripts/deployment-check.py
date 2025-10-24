@@ -18,9 +18,6 @@ from rich.table import Table
 from rich.panel import Panel
 import sys
 
-# --------------------------------------
-# Setup
-# --------------------------------------
 console = Console()
 load_dotenv()
 
@@ -28,32 +25,15 @@ RESOURCE_GROUP = os.environ.get("RESOURCE_GROUP")
 APP_NAME = os.environ.get("APP_NAME")
 SLOT = os.environ.get("SLOT")
 SUBSCRIPTION_ID = os.environ.get("SUBSCRIPTION_ID")
-FILES_TO_CHECK = os.environ.get("FILES_TO_CHECK")
-
-if not SUBSCRIPTION_ID:
-    try:
-        SUBSCRIPTION_ID = subprocess.run(
-            ["az", "account", "show", "--query", "id", "-o", "tsv"],
-            check=True, capture_output=True, text=True,
-        ).stdout.strip()
-    except subprocess.CalledProcessError as exc:
-        console.print("[red]❌ Could not determine subscription ID from Azure CLI.[/red]")
-        raise
-
-if not FILES_TO_CHECK:
-    raise RuntimeError("FILES_TO_CHECK environment variable must be provided (comma separated list)")
-
-FILES_TO_CHECK = [file.strip() for file in FILES_TO_CHECK.split(",") if file.strip()]
 USE_CLI_AUTH = os.getenv("USE_CLI_AUTH", "").lower() == "true"
 
 SSH_CONNECTION_RETRY_COUNT = 3
 SSH_CONNECTION_DELAY_IN_SECONDS = 2
-CONSISTENCY_CHECK_MAX_RETRIES = 5
+CONSISTENCY_CHECK_MAX_RETRIES = 3
 CONSISTENCY_CHECK_DELAY_IN_SECONDS = 10
 
-
 # --------------------------------------
-# Helper Classes & Auth
+# Auth Helpers
 # --------------------------------------
 def get_cli_token():
     result = subprocess.run(
@@ -91,19 +71,17 @@ def get_instance_ids():
             RESOURCE_GROUP, APP_NAME, publishing_profile_options=options
         )
 
-    publishing_profile_xml = b"".join(publishing_profile).decode("utf-8")
-    profile_root = ET.fromstring(publishing_profile_xml)
-    msdeploy_profile = profile_root.find(".//publishProfile[@publishMethod='MSDeploy']")
-    user = msdeploy_profile.attrib["userName"]
-    password = msdeploy_profile.attrib["userPWD"]
+    xml_data = b"".join(publishing_profile).decode("utf-8")
+    root = ET.fromstring(xml_data)
+    msdeploy = root.find(".//publishProfile[@publishMethod='MSDeploy']")
+    user, password = msdeploy.attrib["userName"], msdeploy.attrib["userPWD"]
     instances_list = [instance.id.split("/")[-1] for instance in instances]
-    kudu_auth_base64 = base64.b64encode(f"{user}:{password}".encode()).decode()
+    auth_b64 = base64.b64encode(f"{user}:{password}".encode()).decode()
     console.print(f"[green]✅ Found instances:[/green] {instances_list}")
-    return instances_list, kudu_auth_base64
-
+    return instances_list, auth_b64
 
 # --------------------------------------
-# Remote Commands via SSH Tunnel
+# SSH Helpers
 # --------------------------------------
 async def get_instance_connection_details(instance_id):
     args = [
@@ -117,13 +95,11 @@ async def get_instance_connection_details(instance_id):
         args.extend(["--slot", SLOT])
 
     proc = await asyncio.create_subprocess_exec(*args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
-
     port = None
     password = None
 
     async for line in proc.stdout:
         decoded = line.decode().strip()
-        console.print(f"[grey58]{decoded}[/grey58]")
         if not port:
             m = re.search(r"Opening tunnel on port: (\d+)", decoded)
             if m: port = m.group(1)
@@ -163,74 +139,62 @@ async def ssh_command(port, password, command):
     stdout, stderr = await proc.communicate()
     return stdout.decode().strip(), stderr.decode().strip()
 
+# --------------------------------------
+# New helper: list all files in wwwroot
+# --------------------------------------
+async def list_all_wwwroot_files(port, password):
+    cmd = "cd /home/site/wwwroot && find . -type f"
+    out, err = await ssh_command(port, password, cmd)
+    files = [f.strip().lstrip("./") for f in out.splitlines() if f.strip()]
+    console.print(f"[cyan]📂 Found {len(files)} files under wwwroot[/cyan]")
+    return files
+
 
 async def get_file_checksum(port, password, file):
     for attempt in range(SSH_CONNECTION_RETRY_COUNT):
-        out, err = await ssh_command(port, password, f"md5sum {file}")
-        lines = [l.strip() for l in out.splitlines() if l.strip()]
-        console.print(f"[grey62]md5sum output: {lines}[/grey62]")
-        for line in lines:
-            parts = line.split()
-            if len(parts) >= 2 and re.fullmatch(r"[a-fA-F0-9]{32}", parts[0]):
-                return parts[0]
+        out, err = await ssh_command(port, password, f"md5sum /home/site/wwwroot/{file}")
+        m = re.search(r"\b([a-fA-F0-9]{32})\b", out)
+        if m:
+            return m.group(1)
         await asyncio.sleep(SSH_CONNECTION_DELAY_IN_SECONDS)
-    raise RuntimeError(f"Failed to get checksum for {file} after {SSH_CONNECTION_RETRY_COUNT} retries")
-
-
-async def get_instance_servername(kudu_auth_base64, instance_id, port, password):
-    kudu_app = APP_NAME if not SLOT or SLOT.lower() == "production" else f"{APP_NAME}-{SLOT}"
-    url = f"https://{kudu_app}.scm.azurewebsites.net/api/command?instance={instance_id}"
-    payload = {"command": '/bin/sh -c "echo $COMPUTERNAME"'}
-    headers = {"Authorization": f"Basic {kudu_auth_base64}", "Content-Type": "application/json"}
-    resp = requests.post(url, headers=headers, data=json.dumps(payload))
-    if resp.status_code == 200:
-        return resp.json().get("Output", "").strip() or "Unknown"
-    # fallback to SSH
-    out, _ = await ssh_command(port, password, "echo $COMPUTERNAME || hostname")
-    return out.strip() or "Unknown"
-
+    raise RuntimeError(f"Failed to get checksum for {file}")
 
 # --------------------------------------
-# Consistency Check Logic
+# Core Logic
 # --------------------------------------
 async def check_file_versions(instance_ids, kudu_auth_base64):
     files_checksum_dict = {}
     instance_servernames = {}
 
-    if not instance_ids:
-        console.print("[yellow]⚠️ No instances found.[/yellow]")
-        return {}, {}
-
     for instance_id in instance_ids:
         port, password, tunnel_proc = await get_instance_connection_details(instance_id)
-        console.print(f"[cyan]🔗 Connected to instance:[/cyan] {instance_id} on port {port}")
+        console.print(f"[cyan]🔗 Connected to instance:[/cyan] {instance_id} (port {port})")
+
         try:
-            server_name = await get_instance_servername(kudu_auth_base64, instance_id, port, password)
-            instance_servernames[instance_id] = server_name
-            for file in FILES_TO_CHECK:
-                full_path = f"/home/site/wwwroot/{file}"
-                checksum = await get_file_checksum(port, password, full_path)
+            # Discover all files
+            files_to_check = await list_all_wwwroot_files(port, password)
+            console.print(f"[grey58]Computing checksums...[/grey58]")
+
+            for file in files_to_check:
+                checksum = await get_file_checksum(port, password, file)
                 files_checksum_dict.setdefault(file, {}).setdefault(checksum, set()).add(instance_id)
-                console.print(f"[green]✔ {file}[/green] → [bold]{checksum}[/bold] ({server_name})")
         finally:
             await close_tunnel(tunnel_proc)
 
-    console.print("[blue]📊 Final checksums:[/blue]")
+    console.print("[blue]📊 Final checksums summary:[/blue]")
     console.print(json.dumps({k: {ck: list(v) for ck, v in d.items()} for k, d in files_checksum_dict.items()}, indent=2))
-    return files_checksum_dict, instance_servernames
+    return files_checksum_dict
 
 
-def validate_file_versions(files_checksum_dict, instance_servernames):
+def validate_file_versions(files_checksum_dict):
     consistent = True
     for file, checksums in files_checksum_dict.items():
         if len(checksums) != 1:
             consistent = False
             console.print(f"[red]❌ Inconsistent file:[/red] {file}")
             for checksum, instances in checksums.items():
-                for iid in instances:
-                    console.print(f"   - {instance_servernames.get(iid, 'Unknown')} ({iid}) → {checksum}")
+                console.print(f"   {checksum} → {', '.join(instances)}")
     return consistent
-
 
 # --------------------------------------
 # Main
@@ -240,20 +204,21 @@ async def main():
 
     for attempt in range(CONSISTENCY_CHECK_MAX_RETRIES):
         console.rule(f"Attempt {attempt + 1}/{CONSISTENCY_CHECK_MAX_RETRIES}")
-        files_checksum_dict, instance_servernames = await check_file_versions(instance_ids, kudu_auth_base64)
-        if validate_file_versions(files_checksum_dict, instance_servernames):
+        files_checksum_dict = await check_file_versions(instance_ids, kudu_auth_base64)
+        if validate_file_versions(files_checksum_dict):
             console.print(f"[bold green]\n✅ All {SLOT or 'production'} instances are consistent![/bold green]")
             return
         if attempt < CONSISTENCY_CHECK_MAX_RETRIES - 1:
             console.print(f"[yellow]Retrying in {CONSISTENCY_CHECK_DELAY_IN_SECONDS}s...[/yellow]")
             await asyncio.sleep(CONSISTENCY_CHECK_DELAY_IN_SECONDS)
+
     raise ValueError("❌ Deployment consistency check failed: inconsistent file versions")
 
 
 if __name__ == "__main__":
-    console.print("[bold blue]🚀 Starting deployment consistency check[/bold blue]")
+    console.print("[bold blue]🚀 Starting full MD5 consistency check for all files under /home/site/wwwroot[/bold blue]")
     try:
-        asyncio.get_event_loop().run_until_complete(main())
+        asyncio.run(main())
         console.print("[green]🎉 Consistency check completed successfully[/green]")
         sys.exit(0)
     except Exception as e:
