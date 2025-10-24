@@ -186,9 +186,9 @@ async def get_file_checksum(port, password, file):
         output_lines = stdout.decode().split("\n")
         print(f"md5sum command output: {output_lines}")
         checksum_line = next(
-            (line for line in output_lines if re.match(r"^[a-fA-F0-9]{32}\\s+.+", line)),
-            None,
-        )
++            (line for line in output_lines if re.match(r"^[a-fA-F0-9]{32}\s+.+", line)),
++            None,
++        )
 
         if checksum_line:
             return checksum_line.split()[0]
