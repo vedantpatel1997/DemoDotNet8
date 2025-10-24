@@ -14,9 +14,15 @@ from azure.identity import DefaultAzureCredential
 from azure.mgmt.web import WebSiteManagementClient
 from azure.mgmt.web.models import CsmPublishingProfileOptions
 from rich.console import Console
-from rich.table import Table
-from rich.panel import Panel
 import sys
+import warnings
+
+# Suppress cleanup noise from asyncio subprocess transport
+warnings.filterwarnings(
+    "ignore",
+    category=RuntimeWarning,
+    message="coroutine 'BaseSubprocessTransport.__del__'"
+)
 
 console = Console()
 load_dotenv()
@@ -36,6 +42,7 @@ CONSISTENCY_CHECK_DELAY_IN_SECONDS = 10
 # Auth Helpers
 # --------------------------------------
 def get_cli_token():
+    """Return an AccessToken object from Azure CLI."""
     result = subprocess.run(
         ["az", "account", "get-access-token", "--resource", "https://management.azure.com/"],
         capture_output=True, text=True, check=True,
@@ -46,6 +53,7 @@ def get_cli_token():
 
 
 class CLIManagedIdentityCredential:
+    """Credential class that uses Azure CLI token retrieval."""
     def get_token(self, *scopes, **kwargs):
         return get_cli_token()
 
@@ -56,6 +64,7 @@ credential = CLIManagedIdentityCredential() if USE_CLI_AUTH else DefaultAzureCre
 # Azure + Kudu
 # --------------------------------------
 def get_instance_ids():
+    """Fetch App Service instance identifiers and Kudu credentials."""
     console.print("[cyan]🔍 Getting instance IDs...[/cyan]")
     client = WebSiteManagementClient(credential=credential, subscription_id=SUBSCRIPTION_ID)
     options = CsmPublishingProfileOptions(format="WebDeploy")
@@ -84,6 +93,7 @@ def get_instance_ids():
 # SSH Helpers
 # --------------------------------------
 async def get_instance_connection_details(instance_id):
+    """Open remote SSH tunnel to App Service instance."""
     args = [
         "az", "webapp", "create-remote-connection",
         "--subscription", SUBSCRIPTION_ID,
@@ -94,7 +104,10 @@ async def get_instance_connection_details(instance_id):
     if SLOT and SLOT.lower() != "production":
         args.extend(["--slot", SLOT])
 
-    proc = await asyncio.create_subprocess_exec(*args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
+    proc = await asyncio.create_subprocess_exec(
+        *args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT
+    )
+
     port = None
     password = None
 
@@ -102,10 +115,12 @@ async def get_instance_connection_details(instance_id):
         decoded = line.decode().strip()
         if not port:
             m = re.search(r"Opening tunnel on port: (\d+)", decoded)
-            if m: port = m.group(1)
+            if m:
+                port = m.group(1)
         if not password:
             pm = re.search(r"Password\s*:?\s*(\S+)", decoded, re.IGNORECASE)
-            if pm: password = pm.group(1)
+            if pm:
+                password = pm.group(1)
         if port and password:
             break
 
@@ -116,6 +131,7 @@ async def get_instance_connection_details(instance_id):
 
 
 async def close_tunnel(proc):
+    """Close az tunnel subprocess safely."""
     if proc.returncode is not None:
         return
     proc.terminate()
@@ -127,6 +143,7 @@ async def close_tunnel(proc):
 
 
 async def ssh_command(port, password, command):
+    """Execute command on App Service instance over SSH."""
     ssh_cmd = [
         "sshpass", "-p", password, "ssh", "root@127.0.0.1",
         "-m", "hmac-sha1", "-p", str(port),
@@ -140,19 +157,21 @@ async def ssh_command(port, password, command):
     return stdout.decode().strip(), stderr.decode().strip()
 
 # --------------------------------------
-# New helper: list all files in wwwroot
+# File Operations
 # --------------------------------------
 async def list_all_wwwroot_files(port, password):
+    """List all files under /home/site/wwwroot recursively."""
     cmd = "cd /home/site/wwwroot && find . -type f"
-    out, err = await ssh_command(port, password, cmd)
+    out, _ = await ssh_command(port, password, cmd)
     files = [f.strip().lstrip("./") for f in out.splitlines() if f.strip()]
     console.print(f"[cyan]📂 Found {len(files)} files under wwwroot[/cyan]")
     return files
 
 
 async def get_file_checksum(port, password, file):
+    """Return MD5 checksum of a given file."""
     for attempt in range(SSH_CONNECTION_RETRY_COUNT):
-        out, err = await ssh_command(port, password, f"md5sum /home/site/wwwroot/{file}")
+        out, _ = await ssh_command(port, password, f"md5sum /home/site/wwwroot/{file}")
         m = re.search(r"\b([a-fA-F0-9]{32})\b", out)
         if m:
             return m.group(1)
@@ -163,15 +182,14 @@ async def get_file_checksum(port, password, file):
 # Core Logic
 # --------------------------------------
 async def check_file_versions(instance_ids, kudu_auth_base64):
+    """Compute MD5 for every file in every instance."""
     files_checksum_dict = {}
-    instance_servernames = {}
 
     for instance_id in instance_ids:
         port, password, tunnel_proc = await get_instance_connection_details(instance_id)
         console.print(f"[cyan]🔗 Connected to instance:[/cyan] {instance_id} (port {port})")
 
         try:
-            # Discover all files
             files_to_check = await list_all_wwwroot_files(port, password)
             console.print(f"[grey58]Computing checksums...[/grey58]")
 
@@ -187,6 +205,7 @@ async def check_file_versions(instance_ids, kudu_auth_base64):
 
 
 def validate_file_versions(files_checksum_dict):
+    """Compare checksums across instances and detect inconsistencies."""
     consistent = True
     for file, checksums in files_checksum_dict.items():
         if len(checksums) != 1:
@@ -214,11 +233,16 @@ async def main():
 
     raise ValueError("❌ Deployment consistency check failed: inconsistent file versions")
 
-
+# --------------------------------------
+# Entrypoint
+# --------------------------------------
 if __name__ == "__main__":
     console.print("[bold blue]🚀 Starting full MD5 consistency check for all files under /home/site/wwwroot[/bold blue]")
     try:
-        asyncio.run(main())
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(main())
+        loop.close()
         console.print("[green]🎉 Consistency check completed successfully[/green]")
         sys.exit(0)
     except Exception as e:
