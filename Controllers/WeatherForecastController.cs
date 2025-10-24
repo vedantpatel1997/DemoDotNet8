@@ -57,13 +57,14 @@ namespace DemoDotNet8.Controllers
         public IActionResult GetInstanceInfo()
         {
             var instanceId = Environment.GetEnvironmentVariable("WEBSITE_INSTANCE_ID") ?? "unknown";
-            var instanceName = Environment.GetEnvironmentVariable("WEBSITE_INSTANCE_NAME") ?? "unknown";
+            var instanceName = Environment.GetEnvironmentVariable("COMPUTERNAME") ?? "unknown";
 
             return Ok(new
             {
                 ApiVersion = _apiVersion,
                 InstanceId = instanceId,
                 InstanceName = instanceName
+                
             });
         }
     }
