@@ -1,47 +1,3 @@
-name: Build and deploy ASP.NET Core app to Azure Web App - Sample-net8
-
-on:
-  push:
-    branches:
-      - master
-  workflow_dispatch:
-
-env:
-  AZURE_WEBAPP_NAME: "2510200040008352"
-  AZURE_RESOURCE_GROUP: "TempRG"
-  AZURE_SLOT_NAME: "Production"    # Change if you use a non-Production slot
-  FILES_TO_CHECK: "DemoDotNet8.dll"
-
-jobs:
-  build:
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Set up .NET SDK
-        uses: actions/setup-dotnet@v4
-        with:
-          dotnet-version: "8.x"
-
-      - name: Restore dependencies
-        run: dotnet restore
-
-      - name: Build with dotnet
-        run: dotnet build --configuration Release --no-restore
-
-      - name: Publish with dotnet
-        run: dotnet publish --configuration Release --no-build --output ./publish_output
-
-      - name: Upload artifact for deployment
-        uses: actions/upload-artifact@v4
-        with:
-          name: published-app
-          path: ./publish_output
-
   deploy:
     runs-on: ubuntu-latest
     needs: build
@@ -50,14 +6,14 @@ jobs:
       contents: read
 
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
       - name: Download published artifact
         uses: actions/download-artifact@v4
         with:
           name: published-app
           path: ./publish_output
-
-      - name: Checkout repository
-        uses: actions/checkout@v4
 
       - name: Login to Azure
         uses: azure/login@v2
@@ -83,15 +39,12 @@ jobs:
           set -e
           python -m pip install --upgrade pip
           pip install -r scripts/requirements.txt
-
           SUBSCRIPTION_ID=$(az account show --query id -o tsv)
-
           echo "RESOURCE_GROUP=${{ env.AZURE_RESOURCE_GROUP }}" > scripts/.env
           echo "APP_NAME=${{ env.AZURE_WEBAPP_NAME }}" >> scripts/.env
           echo "SLOT=${{ env.AZURE_SLOT_NAME }}" >> scripts/.env
           echo "SUBSCRIPTION_ID=${SUBSCRIPTION_ID}" >> scripts/.env
           echo "FILES_TO_CHECK=${{ env.FILES_TO_CHECK }}" >> scripts/.env
           echo "USE_CLI_AUTH=true" >> scripts/.env
-
           python scripts/deployment-check.py || echo "DEPLOYMENT_CHECK_FAILED=true" >> $GITHUB_ENV
           rm -f scripts/.env
